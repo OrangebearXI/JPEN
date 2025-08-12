@@ -3,12 +3,11 @@ _addon.author   = 'Orangebear'
 _addon.version  = '1.00'
 _addon.commands = {'jpen'}
 
+-- Your modules live in JPEN/Modules
 local base = windower.addon_path
 package.path = table.concat({
     package.path,
-    base .. '?.lua',
-    base .. 'modules/?.lua',
-    base .. 'modules/?/init.lua',
+    base .. 'Modules/?.lua',
 }, ';')
 
 local packets   = require('packets')
@@ -27,12 +26,12 @@ end
 
 local defaults = {
     enabled = true,
-    max_lines = 7,
+    max_lines = 5,
 
     font = 'Segoe UI',
     size = 10,
     line_gap = 2,
-    pos = {x = 100, y = 300},
+    pos = {x = 795, y = 1095},
 
     api_key = '',
     batch_size = 5,
@@ -47,43 +46,42 @@ local defaults = {
     box_width = 520,
     box_pad_x = 8,
     box_pad_y = 8,
-    overscan_y = 3,
+    overscan_y = 6,
 
     bg = { enabled = true, path = '', alpha = 255 },
 }
 
 local settings = config.load(defaults)
+
+-- helpers
 local function file_exists(p)
     local f = io.open(p, 'rb')
     if f then f:close() return true end
     return false
 end
 
-local function pick_bg()
-    local roots = {'resources','Resources'}
-    local names = {'bg.png','bg4.png','bg3.png','bg2.png','bg1.png'}
-    for _,r in ipairs(roots) do
-        for _,n in ipairs(names) do
-            local p = windower.addon_path .. r .. '/' .. n
-            if file_exists(p) then return p end
-        end
+local function from_resources(name)
+    local roots = {'Resources','resources'}
+    for _, r in ipairs(roots) do
+        local p = windower.addon_path .. r .. '/' .. name
+        if file_exists(p) then return p end
     end
+    return nil
 end
 
+-- default to bg4.png unless user has a valid custom path
 if not settings.bg.path or settings.bg.path == '' or not file_exists(settings.bg.path) then
-    local p = pick_bg()
-    if p then
-        settings.bg.path = p
-        config.save(settings)
-    end
-end
-if settings.bg.path == '' then
-    settings.bg.path = windower.addon_path .. 'resources/bg4.png'
+    settings.bg.path = from_resources('bg4.png')
+                    or from_resources('bg.png')
+                    or from_resources('bg3.png')
+                    or from_resources('bg2.png')
+                    or from_resources('bg1.png')
+                    or ''
+    config.save(settings)
 end
 
 -- state
-local lines = {}
-local zoning = false
+local lines, zoning = {}, false
 
 local ui = ui_mod.new({
     font = settings.font,
@@ -101,6 +99,7 @@ local ui = ui_mod.new({
 
 local lru = cache_mod.new(settings.cache_size)
 
+-- offline dict used only on HTTP failure
 local dict = {}
 local function load_dict()
     local f = io.open(windower.addon_path .. 'data/dict.tsv', 'r')
@@ -112,10 +111,9 @@ local function load_dict()
     f:close()
 end
 load_dict()
-
 local function dict_translate(s) return dict[s] end
 
--- build one colored line and push to buffer
+-- line push
 local function push_line(mode, sender, text)
     local out = ('%s %s %s : %s'):format(
         fmt.timestamp(),
@@ -127,13 +125,12 @@ local function push_line(mode, sender, text)
     if settings.max_lines and settings.max_lines > 0 and #lines > settings.max_lines then
         table.remove(lines, 1)
     end
-    -- render newest on top
     local b = {}
     for i = #lines, 1, -1 do b[#b + 1] = lines[i] end
     ui:set_text(table.concat(b, '\n'), settings.bg.enabled)
 end
 
--- recent duplicate guard
+-- duplicate guard
 local recent = {}
 local function seen_recent(mode, sender, text)
     local now = socket.gettime()
@@ -190,29 +187,20 @@ end
 -- filtering
 filter.load(settings)
 
--- capture helpers
+-- capture
 local function handle_message(mode, sender, msg_raw)
     if not mode or not msg_raw or msg_raw == '' then return end
     if not settings.enabled then return end
-
-    -- cheap prefilter, avoid convert_auto_trans when safe
     if utf8util.ascii_only(msg_raw) and not msg_raw:find('\xFD', 1, true) then return end
-
     local expanded = utf8util.ensure_utf8(windower.convert_auto_trans(msg_raw))
     if filter.is_filtered(mode, expanded, settings) then return end
     if not utf8util.is_japanese(expanded) then return end
-
     if seen_recent(mode, sender, expanded) then return end
-
     local cached = lru.get(expanded)
-    if cached then
-        push_line(mode, sender, cached)
-        return
-    end
+    if cached then push_line(mode, sender, cached); return end
     q[#q + 1] = {mode = mode, sender = sender, text = expanded}
 end
 
--- events
 windower.register_event('incoming chunk', function(id, data)
     if id ~= 0x017 or not settings.enabled then return end
     local p = packets.parse('incoming', data); if not p then return end
@@ -257,7 +245,7 @@ windower.register_event('prerender', function()
     network_tick()
 end)
 
--- zone
+-- zoning
 local function set_zoning(v)
     zoning = v and true or false
     if zoning then
@@ -327,7 +315,7 @@ windower.register_event('addon command', function(cmd, ...)
             windower.add_to_chat(207, '[jpen] Background disabled.')
         else
             local n = name:gsub('%.png$',''); if n == '' then n = 'bg' end
-            local p = windower.addon_path .. 'resources/' .. n .. '.png'
+            local p = from_resources(n .. '.png') or (windower.addon_path .. 'Resources/' .. n .. '.png')
             settings.bg.path = p; settings.bg.enabled = true; config.save(settings)
             ui:set_bg_path(p)
             windower.add_to_chat(207, '[jpen] Background set to '..n..'.png')
@@ -387,7 +375,6 @@ end)
 -- lifecycle
 windower.register_event('load', function()
     ui:warm()
-    -- initial draw if lines exist
     if #lines > 0 and settings.enabled then
         local b = {}
         for i = #lines, 1, -1 do b[#b + 1] = lines[i] end
